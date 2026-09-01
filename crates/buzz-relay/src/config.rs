@@ -70,6 +70,18 @@ impl std::fmt::Debug for KlipyConfig {
     }
 }
 
+/// Relay-owned HiveTalk (LiveKit video) "Meetings" proxy target.
+///
+/// Unlike [`KlipyConfig`] this holds **no** credential: the HiveTalk integration
+/// is per-user, so every meeting operation is authorized by the member's own
+/// signed request (see `RESEARCH/MEETINGS_HIVETALK_PLAN.md` D5). Unset means the
+/// `/meetings/*` proxy routes return 404 and NIP-11 does not advertise Meetings.
+#[derive(Debug, Clone)]
+pub struct HivetalkConfig {
+    /// HiveTalk control-plane API root, without a trailing slash.
+    pub api_root: String,
+}
+
 /// Maximum configured jitter, leaving ten seconds of the hard-drain budget for
 /// WebSocket close-frame delivery after the final delayed cancellation.
 pub const MAX_DRAIN_JITTER_MS: u64 = 20_000;
@@ -246,6 +258,12 @@ pub struct Config {
     /// and its proxy routes return 404.
     pub klipy: Option<KlipyConfig>,
 
+    /// Relay-owned HiveTalk "Meetings" proxy. Unset means the `/meetings/*`
+    /// routes return 404 and NIP-11 does not advertise Meetings. Set via
+    /// `BUZZ_HIVETALK_API_ROOT` (e.g. `https://premrelay.exe.xyz`). Holds no
+    /// credential.
+    pub hivetalk: Option<HivetalkConfig>,
+
     /// Media storage configuration (S3/MinIO).
     pub media: buzz_media::MediaConfig,
     /// Maximum concurrent media uploads handled by one relay process.
@@ -350,6 +368,10 @@ fn rate_limit_config_from_env() -> Result<buzz_auth::RateLimitConfig, ConfigErro
         gif_searches_per_min: positive_u64_from_env(
             "BUZZ_RATE_LIMIT_GIF_SEARCHES_PER_MIN",
             defaults.gif_searches_per_min,
+        )?,
+        meeting_actions_per_min: positive_u64_from_env(
+            "BUZZ_RATE_LIMIT_MEETING_ACTIONS_PER_MIN",
+            defaults.meeting_actions_per_min,
         )?,
         human_api_calls_per_min: positive_u64_from_env(
             "BUZZ_RATE_LIMIT_HUMAN_API_CALLS_PER_MIN",
@@ -665,6 +687,12 @@ impl Config {
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty())
             .map(|api_key| KlipyConfig { api_key });
+
+        let hivetalk = std::env::var("BUZZ_HIVETALK_API_ROOT")
+            .ok()
+            .map(|value| value.trim().trim_end_matches('/').to_string())
+            .filter(|value| !value.is_empty())
+            .map(|api_root| HivetalkConfig { api_root });
 
         // Note: intentionally not prefixed with BUZZ_ — this is a relay-identity
         // config that may be shared across multiple services (e.g., ACP agent).
@@ -1058,6 +1086,7 @@ impl Config {
             relay_operator_pubkeys,
             allow_nip_oa_auth,
             klipy,
+            hivetalk,
             media,
             media_max_concurrent_uploads,
             media_max_concurrent_uploads_per_pubkey,
@@ -1097,6 +1126,44 @@ mod tests {
         let debug = format!("{config:?}");
         assert!(debug.contains("[REDACTED]"));
         assert!(!debug.contains("private-klipy-key"));
+    }
+
+    #[test]
+    fn hivetalk_config_is_none_by_default_and_strips_trailing_slash() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let previous = std::env::var_os("BUZZ_HIVETALK_API_ROOT");
+
+        std::env::remove_var("BUZZ_HIVETALK_API_ROOT");
+        let unset = Config::from_env()
+            .expect("config with meetings unset")
+            .hivetalk;
+
+        std::env::set_var("BUZZ_HIVETALK_API_ROOT", "  https://premrelay.exe.xyz/  ");
+        let configured = Config::from_env()
+            .expect("config with meetings set")
+            .hivetalk;
+
+        std::env::set_var("BUZZ_HIVETALK_API_ROOT", "   ");
+        let blank = Config::from_env()
+            .expect("config with blank meetings root")
+            .hivetalk;
+
+        if let Some(value) = previous {
+            std::env::set_var("BUZZ_HIVETALK_API_ROOT", value);
+        } else {
+            std::env::remove_var("BUZZ_HIVETALK_API_ROOT");
+        }
+
+        // Unset means Meetings is off — `nip11.rs` gates the whole descriptor on
+        // this being `None`, so a default here would advertise a provider the
+        // operator never configured.
+        assert!(unset.is_none());
+        // A trailing slash would produce `.../api//plans` upstream.
+        assert_eq!(
+            configured.expect("hivetalk configured").api_root,
+            "https://premrelay.exe.xyz"
+        );
+        assert!(blank.is_none());
     }
 
     // Mutex to serialize tests that mutate environment variables.
