@@ -321,6 +321,17 @@ test("fetchMeetingsCapability throws on a transient /info error", async () => {
   }
 });
 
+test("fetchMeetingsCapability throws on a malformed /info body", async () => {
+  globalThis.fetch = async () =>
+    new Response("<html>proxy error</html>", { status: 200 });
+  try {
+    // A corrupted 200 must not read as a confirmed "Meetings unsupported".
+    await assert.rejects(fetchMeetingsCapability(RELAY_WS));
+  } finally {
+    teardown();
+  }
+});
+
 test("fetchMeetingsCapability resolves null when /info omits the capability", async () => {
   globalThis.fetch = async () =>
     new Response(JSON.stringify({ supported_extensions: [] }), { status: 200 });

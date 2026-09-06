@@ -288,7 +288,10 @@ export async function fetchMeetingsCapability(
   if (!response.ok) {
     throw new Error(`relay /info responded ${response.status}`);
   }
-  const info = (await response.json().catch(() => ({}))) as RelayMeetingsInfo;
+  // Let a malformed body throw rather than coercing it to `{}`: an empty object
+  // resolves as a *successful* "Meetings unsupported" probe and hides the nav.
+  // A proxy that corrupts one response should look transient, not permanent.
+  const info = (await response.json()) as RelayMeetingsInfo;
   return relayMeetingsCapability(info);
 }
 
