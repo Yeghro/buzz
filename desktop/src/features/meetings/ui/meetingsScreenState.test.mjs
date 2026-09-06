@@ -12,21 +12,35 @@ test("selectMeetingsView: no capability + loading -> loading", () => {
   assert.deepEqual(
     selectMeetingsView({
       hasCapability: false,
-      isCapabilityLoading: true,
+      isUnavailable: false,
       deepLink: {},
     }),
     { kind: "loading" },
   );
 });
 
-test("selectMeetingsView: no capability + settled -> unavailable", () => {
+test("selectMeetingsView: no capability + settled unavailable -> unavailable", () => {
   assert.deepEqual(
     selectMeetingsView({
       hasCapability: false,
-      isCapabilityLoading: false,
+      isUnavailable: true,
       deepLink: {},
     }),
     { kind: "unavailable" },
+  );
+});
+
+test("selectMeetingsView: no capability + transient probe failure -> loading", () => {
+  // The probe threw (relay 5xx / malformed body) so it never settled on
+  // "unavailable". Show the spinner, not the permanent screen — the sidebar
+  // entry is retained on the same signal.
+  assert.deepEqual(
+    selectMeetingsView({
+      hasCapability: false,
+      isUnavailable: false,
+      deepLink: {},
+    }),
+    { kind: "loading" },
   );
 });
 
@@ -34,7 +48,7 @@ test("selectMeetingsView: join deep link -> call view", () => {
   assert.deepEqual(
     selectMeetingsView({
       hasCapability: true,
-      isCapabilityLoading: false,
+      isUnavailable: false,
       deepLink: { action: "join", room: "weekly-sync" },
     }),
     { kind: "call", room: "weekly-sync" },
@@ -45,7 +59,7 @@ test("selectMeetingsView: start deep link -> list with prefill + focus", () => {
   assert.deepEqual(
     selectMeetingsView({
       hasCapability: true,
-      isCapabilityLoading: false,
+      isUnavailable: false,
       deepLink: { action: "start", room: "design-review" },
     }),
     { kind: "list", prefillRoom: "design-review", focusStart: true },
@@ -56,7 +70,7 @@ test("selectMeetingsView: action without room falls back to plain list", () => {
   assert.deepEqual(
     selectMeetingsView({
       hasCapability: true,
-      isCapabilityLoading: false,
+      isUnavailable: false,
       deepLink: { action: "join" },
     }),
     { kind: "list", focusStart: false },

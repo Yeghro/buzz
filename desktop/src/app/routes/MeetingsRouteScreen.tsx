@@ -27,7 +27,7 @@ export function MeetingsRouteScreen({
   action,
 }: MeetingsRouteScreenProps) {
   const { goMeetings } = useAppNavigation();
-  const { capability, isLoading } = useMeetingsCapability();
+  const { capability, isUnavailable } = useMeetingsCapability();
   const roomsQuery = useMeetingRoomsQuery();
   const myRoomsQuery = useMyMeetingRoomsQuery();
   const registerRoom = useRegisterRoomMutation();
@@ -43,7 +43,7 @@ export function MeetingsRouteScreen({
 
   const view = selectMeetingsView({
     hasCapability: capability !== null,
-    isCapabilityLoading: isLoading,
+    isUnavailable,
     deepLink: { action, room },
   });
 

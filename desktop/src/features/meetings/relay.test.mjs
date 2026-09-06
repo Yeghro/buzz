@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  fetchMeetingsCapability,
   getMeetingToken,
   getPaymentStatus,
   listRooms,
@@ -302,6 +303,40 @@ test("getMeetingToken embeds a body-signed event with the upstream `u` tag", asy
     const inner = JSON.parse(body.attributes.signed_event);
     assert.equal(tag(inner, "u"), "https://l402relay.exe.xyz/api/get-token");
     assert.ok(Math.abs(inner.created_at - Math.floor(Date.now() / 1000)) < 300);
+  } finally {
+    teardown();
+  }
+});
+
+test("fetchMeetingsCapability throws on a transient /info error", async () => {
+  globalThis.fetch = async () =>
+    new Response("upstream boom", { status: 503 });
+  try {
+    // A thrown probe leaves `useMeetingsCapability` in its error state, which
+    // keeps the nav entry visible — resolving `null` would hide it as if the
+    // relay permanently lacked Meetings.
+    await assert.rejects(fetchMeetingsCapability(RELAY_WS), /503/);
+  } finally {
+    teardown();
+  }
+});
+
+test("fetchMeetingsCapability throws on a malformed /info body", async () => {
+  globalThis.fetch = async () =>
+    new Response("<html>proxy error</html>", { status: 200 });
+  try {
+    // A corrupted 200 must not read as a confirmed "Meetings unsupported".
+    await assert.rejects(fetchMeetingsCapability(RELAY_WS));
+  } finally {
+    teardown();
+  }
+});
+
+test("fetchMeetingsCapability resolves null when /info omits the capability", async () => {
+  globalThis.fetch = async () =>
+    new Response(JSON.stringify({ supported_extensions: [] }), { status: 200 });
+  try {
+    assert.equal(await fetchMeetingsCapability(RELAY_WS), null);
   } finally {
     teardown();
   }

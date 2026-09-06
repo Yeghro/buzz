@@ -19,16 +19,21 @@ export type MeetingsView =
 
 /**
  * @param hasCapability - relay advertises `buzz-meetings` (capability !== null)
- * @param isCapabilityLoading - capability query still in flight
+ * @param isUnavailable - the probe *settled* on "this relay has no Meetings"
+ *   (`/info` answered and did not advertise it). A still-loading probe and a
+ *   transiently-failed one are both `false` here, so neither shows the permanent
+ *   "unavailable" screen — they show the spinner until the probe resolves. This
+ *   mirrors `useMeetingsCapability`'s sidebar-retention signal exactly, so the
+ *   nav entry and the screen never disagree.
  */
 export function selectMeetingsView(input: {
   hasCapability: boolean;
-  isCapabilityLoading: boolean;
+  isUnavailable: boolean;
   deepLink: MeetingsDeepLink;
 }): MeetingsView {
-  const { hasCapability, isCapabilityLoading, deepLink } = input;
+  const { hasCapability, isUnavailable, deepLink } = input;
   if (!hasCapability) {
-    return isCapabilityLoading ? { kind: "loading" } : { kind: "unavailable" };
+    return isUnavailable ? { kind: "unavailable" } : { kind: "loading" };
   }
   if (deepLink.action === "join" && deepLink.room) {
     return { kind: "call", room: deepLink.room };
