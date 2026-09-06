@@ -197,7 +197,9 @@ const ROOM_INFO_FIELDS: &[&str] = &[
 const PLANS_ENVELOPE_FIELDS: &[&str] = &["free_quota", "plans"];
 /// One `Plan` entry. HiveTalk names these `id` / `price_sats`; `normalizePlans`
 /// in the client also accepts `plan` / `amount_sats` / `period` / `interval`, so
-/// the allowlist carries both spellings rather than deciding for it.
+/// the allowlist carries both spellings rather than deciding for it. `title` and
+/// `recording_retention` are rendered by the client's `PlanCard`; dropping them
+/// left every plan with a slug-derived name and no retention line.
 const PLAN_FIELDS: &[&str] = &[
     "amount_sats",
     "can_record",
@@ -207,7 +209,9 @@ const PLAN_FIELDS: &[&str] = &[
     "period",
     "plan",
     "price_sats",
+    "recording_retention",
     "room_quota",
+    "title",
 ];
 /// One entry of `/api/list-rooms` (`RoomSummary`, live LiveKit rooms) or
 /// `/api/rooms-by-pubkey` (`OwnedRoom`, registry rows).
@@ -779,6 +783,21 @@ fn filter_body(filter: Filter, upstream: Value) -> Value {
             array_key,
             item_fields,
         } => {
+            // A bare-array response (HiveTalk drops the envelope) is a shape the
+            // client's `normalizePlans` still accepts. `pick_fields` on an array
+            // returns `{}`, which would blank the plan grid, so rewrap the
+            // allowlisted elements under `array_key`.
+            if let Value::Array(items) = upstream {
+                let capped: Vec<Value> = items
+                    .into_iter()
+                    .take(MAX_ARRAY_ELEMENTS)
+                    .map(|item| pick_fields(&item, item_fields))
+                    .collect();
+                return Value::Object(Map::from_iter([(
+                    array_key.to_string(),
+                    Value::Array(capped),
+                )]));
+            }
             let mut out = pick_fields(&upstream, fields);
             if let Some(Value::Array(items)) = out.get_mut(array_key) {
                 *items = std::mem::take(items)
@@ -1181,6 +1200,54 @@ mod tests {
             serde_json::json!({
                 "free_quota": 1,
                 "plans": [{ "id": "standard_1y", "price_sats": 21_000 }],
+            })
+        );
+    }
+
+    /// HiveTalk may drop the `/plans` envelope and answer a bare array. The
+    /// client's `normalizePlans` accepts that; an envelope filter that collapsed
+    /// it to `{}` blanked the plan grid and blocked subscription purchase.
+    #[test]
+    fn filter_envelope_rewraps_a_bare_array_response() {
+        let filtered = filter_body(
+            ROUTE_PLANS.filter,
+            serde_json::json!([
+                { "id": "standard_1y", "price_sats": 360, "cost_basis_msat": "leak" },
+            ]),
+        );
+        assert_eq!(
+            filtered,
+            serde_json::json!({
+                "plans": [{ "id": "standard_1y", "price_sats": 360 }],
+            })
+        );
+    }
+
+    /// `title` / `recording_retention` are rendered by the client `PlanCard`;
+    /// a plan-fields allowlist that dropped them left slug names and no
+    /// retention line.
+    #[test]
+    fn filter_envelope_keeps_plan_title_and_retention() {
+        let filtered = filter_body(
+            ROUTE_PLANS.filter,
+            serde_json::json!({
+                "plans": [{
+                    "id": "standard_1y",
+                    "price_sats": 360,
+                    "title": "Standard (1 year)",
+                    "recording_retention": "30 days",
+                }],
+            }),
+        );
+        assert_eq!(
+            filtered,
+            serde_json::json!({
+                "plans": [{
+                    "id": "standard_1y",
+                    "price_sats": 360,
+                    "title": "Standard (1 year)",
+                    "recording_retention": "30 days",
+                }],
             })
         );
     }

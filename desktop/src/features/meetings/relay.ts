@@ -280,7 +280,14 @@ export async function fetchMeetingsCapability(
     headers: { Accept: "application/nostr+json" },
     signal,
   });
-  if (!response.ok) return null;
+  // A relay always answers `/info` (NIP-11), whether or not it runs Meetings —
+  // so a non-OK status is a transient fault, not "Meetings unsupported". Throw
+  // rather than resolve `null`: `useMeetingsCapability` only hides the nav entry
+  // once the probe *succeeds* with no capability, so a thrown error keeps the
+  // entry in place through a blip instead of flickering it out.
+  if (!response.ok) {
+    throw new Error(`relay /info responded ${response.status}`);
+  }
   const info = (await response.json().catch(() => ({}))) as RelayMeetingsInfo;
   return relayMeetingsCapability(info);
 }
