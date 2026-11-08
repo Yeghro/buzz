@@ -1,3 +1,4 @@
+import 'package:buzz/shared/widgets/feedback_snackbar.dart';
 import 'dart:async';
 
 import 'package:flutter/foundation.dart';
@@ -5,7 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:buzz/shared/theme/buzz_icons.dart';
 
 import '../../shared/profile/user_profile.dart';
 import '../../shared/relay/relay.dart';
@@ -111,13 +112,17 @@ class ProfileEditPage extends HookConsumerWidget {
       bool multiline = false,
     }) async {
       if (defaultTargetPlatform == TargetPlatform.iOS) {
+        final sheetTheme = utilitySurfaceThemeData(Theme.of(context));
         try {
           await IosProfileTextEditor.presentUntilSaved(
             title: title,
             initialValue: initialValue,
             placeholder: hintText,
             multiline: multiline,
-            brightness: Theme.of(context).brightness,
+            brightness: sheetTheme.brightness,
+            pageBackgroundColor: sheetTheme.colorScheme.surface,
+            containerBackgroundColor:
+                sheetTheme.colorScheme.surfaceContainerHighest,
             onSave: onSave,
             shouldRetryOnError: (error) =>
                 error is! ProfileCommunityChangedException,
@@ -128,10 +133,9 @@ class ProfileEditPage extends HookConsumerWidget {
                   !(ModalRoute.of(context)?.isCurrent ?? true)) {
                 return;
               }
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(
-                  content: Text("We couldn't save this change. Try again."),
-                ),
+              ScaffoldMessenger.of(context).showFeedbackSnackBar(
+                const SnackBar(content: Text('Couldn’t save changes')),
+                kind: ToastKind.error,
               );
             },
           );
@@ -270,6 +274,7 @@ class ProfileEditPage extends HookConsumerWidget {
         ? avatarDraft.value
         : null;
     final avatarHandoff = ref.watch(profileAvatarHandoffProvider);
+    final pageTitle = isEditingAvatar.value ? 'Edit Photo' : 'Profile';
 
     return PopScope(
       canPop: !isEditingAvatar.value,
@@ -279,18 +284,16 @@ class ProfileEditPage extends HookConsumerWidget {
         }
       },
       child: FrostedScaffold(
-        backgroundColor: context.colors.surface,
+        useUtilitySurfaceTheme: true,
         resizeToAvoidBottomInset: isEditingAvatar.value ? false : null,
         appBar: FrostedAppBar(
+          nativeTitle: pageTitle,
           centerTitle: true,
           title: AnimatedSwitcher(
             duration: reduceMotion
                 ? const Duration(milliseconds: 120)
                 : const Duration(milliseconds: 220),
-            child: Text(
-              isEditingAvatar.value ? 'Edit Photo' : 'Profile',
-              key: ValueKey(isEditingAvatar.value),
-            ),
+            child: Text(pageTitle, key: ValueKey(isEditingAvatar.value)),
           ),
           leading: isEditingAvatar.value
               ? defaultTargetPlatform == TargetPlatform.iOS
@@ -308,7 +311,7 @@ class ProfileEditPage extends HookConsumerWidget {
                         onPressed: isClosingAvatar.value
                             ? null
                             : () => unawaited(closeAvatarEditor()),
-                        icon: const Icon(LucideIcons.arrowLeft),
+                        icon: const Icon(BuzzIcons.arrowLeft),
                       )
               : null,
           actions: isEditingAvatar.value
@@ -535,7 +538,7 @@ class _ProfilePhotoEditor extends ConsumerWidget {
           key: const ValueKey('profile-edit-avatar'),
           imageUrl: profile?.avatarUrl,
           radius: ProfileEditPage._avatarRadius,
-          backgroundColor: context.colors.primaryContainer,
+          backgroundColor: context.controlSurface,
           loadingImage: activeHandoff == null
               ? null
               : MemoryImage(activeHandoff.animation),
@@ -623,7 +626,7 @@ class _EditChevron extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => Icon(
-    LucideIcons.chevronRight,
+    BuzzIcons.chevronRight,
     size: 18,
     color: context.colors.onSurfaceVariant,
   );
@@ -660,7 +663,7 @@ class _ProfileTextEditSheet extends HookWidget {
       } on ProfileCommunityChangedException {
         if (context.mounted) Navigator.of(context).pop();
       } catch (_) {
-        error.value = "We couldn't save this change. Try again.";
+        error.value = 'Couldn’t save changes';
       } finally {
         if (context.mounted) isSaving.value = false;
       }

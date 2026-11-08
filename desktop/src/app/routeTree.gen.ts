@@ -233,18 +233,18 @@ declare module "@tanstack/react-router" {
       preLoaderRoute: typeof projectsRouteImport;
       parentRoute: typeof rootRouteImport;
     };
-    "/agents": {
-      id: "/agents";
-      path: "/agents";
-      fullPath: "/agents";
-      preLoaderRoute: typeof agentsRouteImport;
-      parentRoute: typeof rootRouteImport;
-    };
     "/meetings": {
       id: "/meetings";
       path: "/meetings";
       fullPath: "/meetings";
       preLoaderRoute: typeof meetingsRouteImport;
+      parentRoute: typeof rootRouteImport;
+    };
+    "/agents": {
+      id: "/agents";
+      path: "/agents";
+      fullPath: "/agents";
+      preLoaderRoute: typeof agentsRouteImport;
       parentRoute: typeof rootRouteImport;
     };
     "/": {

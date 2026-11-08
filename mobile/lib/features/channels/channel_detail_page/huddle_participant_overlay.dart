@@ -168,8 +168,14 @@ class _HuddleParticipantSpotlight extends ConsumerWidget {
       pubkey: pubkey,
       profile: profile,
       fallbackLabel: fallbackLabel,
+      contextualLabel: ref.watch(
+        _huddleIdentityNamesProvider(
+          ephemeralChannelId,
+        ).select((names) => names.labelFor(pubkey)),
+      ),
       isSelf: isSelf,
     );
+    final isAgent = profile?.isAgent == true || fallbackLabel != null;
 
     return Semantics(
       label: active ? '$label, speaking' : label,
@@ -192,8 +198,8 @@ class _HuddleParticipantSpotlight extends ConsumerWidget {
                     ? Duration.zero
                     : const Duration(milliseconds: 180),
                 padding: EdgeInsets.all(active ? Grid.xxs : Grid.half),
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
+                decoration: ShapeDecoration(
+                  shape: avatarShape(isAgent: isAgent),
                   color: context.colors.primary.withValues(
                     alpha: active ? 0.18 : 0.08,
                   ),
@@ -201,12 +207,13 @@ class _HuddleParticipantSpotlight extends ConsumerWidget {
                 child: AvatarImage(
                   imageUrl: profile?.avatarUrl,
                   radius: _huddleParticipantSpotlightRadius,
-                  backgroundColor: context.colors.primaryContainer,
+                  backgroundColor: context.controlSurface,
                   fallback: Icon(
-                    LucideIcons.userRound,
+                    BuzzIcons.userRound,
                     size: 56,
                     color: context.colors.onPrimaryContainer,
                   ),
+                  isAgent: isAgent,
                 ),
               ),
               const SizedBox(height: Grid.twelve),
@@ -262,6 +269,7 @@ class _HuddleParticipantRoster extends ConsumerWidget {
     }
     final profiles = ref.watch(userCacheProvider);
     final fallbackLabels = ref.watch(agentDirectoryDisplayNamesProvider);
+    final names = ref.watch(_huddleIdentityNamesProvider(ephemeralChannelId));
     final activeSpeakerPubkeys = ref.watch(
       huddleSessionProvider.select((session) => session.activeSpeakerPubkeys),
     );
@@ -326,6 +334,7 @@ class _HuddleParticipantRoster extends ConsumerWidget {
                             pubkey: pubkey,
                             profile: profile,
                             fallbackLabel: fallbackLabels[pubkey],
+                            contextualLabel: names.labelFor(pubkey),
                             isSelf: false,
                           );
                           return Semantics(
@@ -341,13 +350,15 @@ class _HuddleParticipantRoster extends ConsumerWidget {
                                   AvatarImage(
                                     imageUrl: profile?.avatarUrl,
                                     radius: 22,
-                                    backgroundColor:
-                                        context.colors.primaryContainer,
+                                    backgroundColor: context.controlSurface,
                                     fallback: Icon(
-                                      LucideIcons.userRound,
+                                      BuzzIcons.userRound,
                                       size: 22,
                                       color: context.colors.onPrimaryContainer,
                                     ),
+                                    isAgent:
+                                        profile?.isAgent == true ||
+                                        fallbackLabels[pubkey] != null,
                                   ),
                                   const SizedBox(width: Grid.twelve),
                                   Expanded(

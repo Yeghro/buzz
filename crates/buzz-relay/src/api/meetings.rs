@@ -48,7 +48,7 @@ use std::time::Duration;
 use axum::{
     extract::{RawQuery, State},
     http::{header, HeaderMap, StatusCode},
-    response::Json,
+    response::{IntoResponse, Json, Response},
 };
 use futures_util::StreamExt;
 use serde_json::{Map, Value};
@@ -58,7 +58,7 @@ use buzz_auth::LimitType;
 use crate::config::HivetalkConfig;
 use crate::state::AppState;
 
-use super::{api_error, bridge, relay_members};
+use super::{api_error, bridge};
 
 pub(crate) const MEETINGS_PREFIX: &str = "/meetings";
 const UPSTREAM_TIMEOUT: Duration = Duration::from_secs(15);
@@ -437,11 +437,14 @@ macro_rules! meeting_handler {
         $(#[$meta])*
         pub async fn $name(
             State(state): State<Arc<AppState>>,
+            slot: crate::access::AccessSlot,
             headers: HeaderMap,
             RawQuery(query): RawQuery,
             body: axum::body::Bytes,
-        ) -> Result<(StatusCode, Json<Value>), (StatusCode, Json<Value>)> {
-            proxy(&state, &headers, query.as_deref(), body, $route).await
+        ) -> Response {
+            proxy(&state, &slot, &headers, query.as_deref(), body, $route)
+                .await
+                .into_response()
         }
     };
 }
@@ -531,29 +534,32 @@ meeting_handler!(
     audience_mode, ROUTE_AUDIENCE_MODE
 );
 
+#[allow(clippy::result_large_err)] // Response is the natural error type for axum handlers
 async fn proxy(
     state: &Arc<AppState>,
+    slot: &crate::access::AccessSlot,
     headers: &HeaderMap,
     query: Option<&str>,
     body: axum::body::Bytes,
     route: Proxied,
-) -> Result<(StatusCode, Json<Value>), (StatusCode, Json<Value>)> {
+) -> Result<(StatusCode, Json<Value>), Response> {
     let Some(config) = state.config.hivetalk.as_ref() else {
-        return Err(api_error(
-            StatusCode::NOT_FOUND,
-            "meetings is not configured",
-        ));
+        return Err(api_error(StatusCode::NOT_FOUND, "meetings is not configured").into_response());
     };
 
     let query = query.filter(|q| !q.is_empty());
-    validate_query(&route, query)?;
+    validate_query(&route, query).map_err(IntoResponse::into_response)?;
 
-    let (tenant, pubkey) = authenticate(state, headers, &route, query, &body).await?;
+    let (tenant, pubkey) = authenticate(state, slot, headers, &route, query, &body).await?;
     if route.metered {
-        enforce_meeting_admission(state, &tenant, &pubkey).await?;
+        enforce_meeting_admission(state, &tenant, &pubkey)
+            .await
+            .map_err(IntoResponse::into_response)?;
     }
 
-    forward(state, config, &route, headers, query, body).await
+    forward(state, config, &route, headers, query, body)
+        .await
+        .map_err(IntoResponse::into_response)
 }
 
 fn validate_query(route: &Proxied, query: Option<&str>) -> Result<(), (StatusCode, Json<Value>)> {
@@ -579,26 +585,15 @@ fn validate_query(route: &Proxied, query: Option<&str>) -> Result<(), (StatusCod
     Ok(())
 }
 
+#[allow(clippy::result_large_err)] // Response is the natural error type for axum handlers
 async fn authenticate(
     state: &Arc<AppState>,
+    slot: &crate::access::AccessSlot,
     headers: &HeaderMap,
     route: &Proxied,
     query: Option<&str>,
     body: &axum::body::Bytes,
-) -> Result<(buzz_core::TenantContext, nostr::PublicKey), (StatusCode, Json<Value>)> {
-    let raw_host = headers
-        .get(header::HOST)
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or("");
-    let tenant = crate::tenant::bind_community(&state.db, raw_host)
-        .await
-        .map_err(|_| {
-            api_error(
-                StatusCode::NOT_FOUND,
-                "relay: no community is configured for this host",
-            )
-        })?;
-
+) -> Result<(buzz_core::TenantContext, nostr::PublicKey), Response> {
     // The buzz-relay NIP-98 covers the exact relay URL the client is hitting,
     // including the query string for signed GETs (`normalize_url` keeps it).
     let mut path = format!("{MEETINGS_PREFIX}{}", route.local);
@@ -606,34 +601,12 @@ async fn authenticate(
         path.push('?');
         path.push_str(q);
     }
-    let method = if route.post { "POST" } else { "GET" };
-    let expected_url = bridge::nip98_expected_url(&state.config.relay_url, &tenant, &path);
-    let body_opt = if route.post {
-        Some(body.as_ref())
+    let (method, body) = if route.post {
+        ("POST", Some(body.as_ref()))
     } else {
-        None
+        ("GET", None)
     };
-    let (pubkey, event_id_bytes) = bridge::verify_bridge_auth_with_options(
-        headers,
-        method,
-        &expected_url,
-        body_opt,
-        true,
-        route.post,
-    )?;
-    bridge::enforce_http_admission(state, &tenant, &pubkey).await?;
-    bridge::check_nip98_replay(state, &tenant, event_id_bytes).await?;
-    relay_members::enforce_relay_membership(
-        state,
-        tenant.community(),
-        &pubkey.to_bytes(),
-        headers
-            .get("x-auth-tag")
-            .and_then(|value| value.to_str().ok()),
-    )
-    .await?;
-
-    Ok((tenant, pubkey))
+    bridge::authenticate_member(state, slot, headers, method, &path, body).await
 }
 
 async fn enforce_meeting_admission(
@@ -952,7 +925,7 @@ mod tests {
     use tower::ServiceExt;
 
     async fn test_state(configure_hivetalk: Option<&str>) -> Arc<AppState> {
-        let mut config = crate::config::Config::from_env().expect("test config");
+        let mut config = crate::config::Config::for_test(); // [FI-TRACE-ENV-RACE]
         config.klipy = None;
         config.hivetalk = configure_hivetalk.map(|root| HivetalkConfig {
             api_root: root.to_string(),
@@ -963,9 +936,8 @@ mod tests {
             .connect_lazy("postgres://buzz:buzz_dev@127.0.0.1:1/buzz") // sadscan:disable np.postgres.1
             .expect("lazy test database pool");
         let db = buzz_db::Db::from_pool(pool.clone());
-        let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .expect("lazy test Redis pool");
+        let redis_pool =
+            buzz_pubsub::redis_connection(&config.redis_url).expect("lazy test Redis pool");
         let pubsub = Arc::new(
             buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
                 .await
