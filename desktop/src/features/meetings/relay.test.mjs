@@ -309,8 +309,7 @@ test("getMeetingToken embeds a body-signed event with the upstream `u` tag", asy
 });
 
 test("fetchMeetingsCapability throws on a transient /info error", async () => {
-  globalThis.fetch = async () =>
-    new Response("upstream boom", { status: 503 });
+  globalThis.fetch = async () => new Response("upstream boom", { status: 503 });
   try {
     // A thrown probe leaves `useMeetingsCapability` in its error state, which
     // keeps the nav entry visible — resolving `null` would hide it as if the

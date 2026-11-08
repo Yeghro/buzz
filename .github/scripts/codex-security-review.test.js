@@ -1,6 +1,8 @@
 "use strict";
 
 const assert = require("node:assert/strict");
+const { readFileSync } = require("node:fs");
+const path = require("node:path");
 const test = require("node:test");
 
 const {
@@ -20,8 +22,15 @@ const NEW_BASE_SHA = "e".repeat(40);
 const MARKER = "<!-- codex-security-review -->";
 const CURRENT_REVIEW_LABEL = "codex-security-review-current";
 
-function pullRequest({ baseSha = OLD_BASE_SHA, headSha = HEAD_SHA } = {}) {
+function pullRequest({
+  author = "outside-contributor",
+  baseSha = OLD_BASE_SHA,
+  headSha = HEAD_SHA,
+  labels = [],
+} = {}) {
   return {
+    author_association: "CONTRIBUTOR",
+    user: { login: author },
     state: "open",
     base: {
       ref: "main",
@@ -33,6 +42,7 @@ function pullRequest({ baseSha = OLD_BASE_SHA, headSha = HEAD_SHA } = {}) {
       repo: { full_name: "outside/buzz" },
     },
     changed_files: 1,
+    labels,
   };
 }
 
@@ -42,12 +52,18 @@ function harness({
   files = [],
   labeledIssues = [],
   liveMainShas = [BASE_SHA],
+  permissions = {
+    "block-member": "write",
+    "outside-contributor": "read",
+    "renovate[bot]": "none",
+  },
 } = {}) {
   const storedComments = [...comments];
   const created = [];
   const updated = [];
   const addedLabels = [];
   const removedLabels = [];
+  const removeLabelCalls = [];
   const outputs = new Map();
   const failures = [];
   const notices = [];
@@ -85,6 +101,7 @@ function harness({
           addedLabels.push(input);
         },
         removeLabel: async (input) => {
+          removeLabelCalls.push(input);
           if (!labelExists) {
             throw Object.assign(new Error("not found"), { status: 404 });
           }
@@ -107,6 +124,25 @@ function harness({
           }
         },
       },
+      repos: {
+        getCollaboratorPermissionLevel: async ({ username }) => {
+          const permission = permissions[username];
+          if (permission === undefined) {
+            throw Object.assign(new Error("not found"), { status: 404 });
+          }
+          if (permission instanceof Error) {
+            throw permission;
+          }
+          if (Array.isArray(permission)) {
+            const next = permission.shift();
+            if (next instanceof Error) {
+              throw next;
+            }
+            return { data: { permission: next } };
+          }
+          return { data: { permission } };
+        },
+      },
       pulls: {
         get: async () => ({ data: pull }),
         listFiles,
@@ -124,7 +160,10 @@ function harness({
     actor: "block-member",
     eventName: "issue_comment",
     payload: {
-      comment: { body: `@buzz-security-review ${HEAD_SHA}` },
+      comment: {
+        body: `@buzz-security-review ${HEAD_SHA}`,
+        user: { login: "block-member" },
+      },
       issue: { number: 6816 },
     },
     repo: { owner: "block", repo: "buzz" },
@@ -139,6 +178,7 @@ function harness({
     info,
     notices,
     outputs,
+    removeLabelCalls,
     removedLabels,
     storedComments,
     updated,
@@ -163,7 +203,7 @@ const NO_FINDINGS_REVIEW = {
 
 async function postReview(state, review = NO_FINDINGS_REVIEW) {
   const environment = {
-    CODEX_MODEL: "gpt-5.6-sol",
+    CODEX_MODEL: "gpt-6.1-sol",
     GITHUB_REPOSITORY: "block/buzz",
     GITHUB_RUN_ID: "1234",
     GITHUB_SERVER_URL: "https://github.com",
@@ -198,6 +238,7 @@ test("prepare binds a member command to the named head SHA", async () => {
   await prepare(current);
 
   assert.deepEqual(current.failures, []);
+  assert.equal(current.outputs.get("authorized"), "true");
   assert.equal(current.outputs.get("head_sha"), HEAD_SHA);
   assert.equal(current.outputs.get("base_sha"), BASE_SHA);
   assert.notEqual(current.outputs.get("base_sha"), OLD_BASE_SHA);
@@ -216,6 +257,159 @@ test("prepare binds a member command to the named head SHA", async () => {
     moved.failures[0],
     new RegExp(`@buzz-security-review ${OTHER_HEAD_SHA}`),
   );
+});
+
+function pullRequestTrigger(options) {
+  const state = harness(options);
+  state.context.eventName = "pull_request_target";
+  state.context.payload.pull_request = {
+    number: 6816,
+    head: { sha: HEAD_SHA },
+    author_association: "MEMBER",
+  };
+  return state;
+}
+
+test("pull request authorization uses the live author's write access", async () => {
+  // Private org members report CONTRIBUTOR; write access still authorizes.
+  const member = pullRequestTrigger({ pull: pullRequest({ author: "block-member" }) });
+  await prepare(member);
+  assert.equal(member.outputs.get("authorized"), "true");
+  assert.deepEqual(member.failures, []);
+
+  for (const author of [
+    "outside-contributor",
+    "nonexistent-user",
+    "renovate[bot]",
+  ]) {
+    const untrusted = pullRequestTrigger({ pull: pullRequest({ author }) });
+    await prepare(untrusted);
+    assert.equal(untrusted.outputs.get("authorized"), undefined);
+    assert.deepEqual(untrusted.failures, []);
+    assert.match(untrusted.info.at(-1), /requires authorization/);
+  }
+});
+
+test("permission lookup errors fail closed", async () => {
+  const failure = Object.assign(new Error("forbidden"), { status: 403 });
+  const author = pullRequestTrigger({
+    pull: pullRequest({ author: "block-member" }),
+    permissions: { "block-member": failure },
+  });
+  await assert.rejects(prepare(author), /forbidden/);
+  assert.equal(author.outputs.size, 0);
+
+  const commenter = harness({ permissions: { "block-member": failure } });
+  await assert.rejects(prepare(commenter), /forbidden/);
+  assert.equal(commenter.outputs.size, 0);
+});
+
+test("transient permission lookup errors are retried", async () => {
+  const unavailable = Object.assign(new Error("unavailable"), {
+    status: 503,
+    response: { headers: { "retry-after": "0" } },
+  });
+  const state = harness({
+    permissions: { "block-member": [unavailable, "write"] },
+  });
+  await prepare(state);
+  assert.equal(state.outputs.get("authorized"), "true");
+  assert.equal(state.warnings.length, 1);
+});
+
+test("stale-marking proceeds when the permission lookup fails", async () => {
+  const state = harness({
+    pull: pullRequest({ author: "block-member", headSha: OTHER_HEAD_SHA }),
+    permissions: {
+      "block-member": Object.assign(new Error("forbidden"), { status: 403 }),
+    },
+    comments: [
+      reviewComment(
+        `${MARKER}\n<!-- codex-security-review-range:${BASE_SHA}...${HEAD_SHA} -->\nold review`,
+      ),
+    ],
+  });
+  state.context.eventName = "pull_request_target";
+  state.context.payload.pull_request = { number: 6816 };
+  await state.github.rest.issues.addLabels({
+    issue_number: 6816,
+    labels: [CURRENT_REVIEW_LABEL],
+  });
+
+  await invalidatePullRequestUpdate(state);
+
+  assert.equal(state.updated.length, 1);
+  assert.match(state.updated[0].body, /review required for the current range/);
+  assert.equal(state.removedLabels.length, 1);
+
+  const unreviewed = harness({
+    pull: pullRequest({ author: "block-member" }),
+    permissions: {
+      "block-member": Object.assign(new Error("forbidden"), { status: 403 }),
+    },
+  });
+  unreviewed.context.eventName = "pull_request_target";
+  unreviewed.context.payload.pull_request = { number: 6816 };
+
+  await invalidatePullRequestUpdate(unreviewed);
+
+  assert.equal(unreviewed.created.length, 1);
+  assert.equal(unreviewed.warnings.length, 1);
+});
+
+test("review commands require a commenter with write access", async () => {
+  for (const login of ["outside-contributor", "nonexistent-user"]) {
+    const state = harness();
+    state.context.payload.comment.user.login = login;
+    await prepare(state);
+    assert.equal(state.outputs.size, 0);
+    assert.deepEqual(state.failures, []);
+    assert.match(state.info.at(-1), /require write access/);
+  }
+
+  const malformed = harness();
+  malformed.context.payload.comment = {
+    body: "@buzz-security-review foo",
+    user: { login: "outside-contributor" },
+  };
+  await prepare(malformed);
+  assert.deepEqual(malformed.failures, []);
+  assert.equal(malformed.outputs.size, 0);
+
+  const trusted = harness({ permissions: { "block-member": "admin" } });
+  await prepare(trusted);
+  assert.equal(trusted.outputs.get("authorized"), "true");
+});
+
+test("workflow leaves comment authorization to the trusted prepare step", () => {
+  const workflow = readFileSync(
+    path.join(__dirname, "../workflows/codex-security-review.yml"),
+    "utf8",
+  );
+  assert.doesNotMatch(workflow, /comment\.author_association/);
+});
+
+test("PR mutation jobs use pull request write permission", () => {
+  const workflow = readFileSync(
+    path.join(__dirname, "../workflows/codex-security-review.yml"),
+    "utf8",
+  );
+  for (const jobName of [
+    "reconcile-base-reviews",
+    "invalidate-previous-review",
+    "post-review",
+  ]) {
+    const start = workflow.indexOf(`  ${jobName}:\n`);
+    assert.notEqual(start, -1, `missing workflow job ${jobName}`);
+    const remainder = workflow.slice(start + 2);
+    const nextJob = remainder.search(/^  [a-z][a-z0-9-]*:\n/m);
+    const job =
+      nextJob === -1
+        ? workflow.slice(start)
+        : workflow.slice(start, start + 2 + nextJob);
+    assert.match(job, /^      pull-requests: write$/m);
+    assert.doesNotMatch(job, /^      issues: write$/m);
+  }
 });
 
 test("prepare rejects review commands without a full exact SHA", async () => {
@@ -431,7 +625,10 @@ test("base reconciliation does not create comments on unreviewed PRs", async () 
 
 test("pull request updates invalidate member reviews without adding placeholders", async () => {
   const reviewed = harness({
-    pull: pullRequest({ headSha: OTHER_HEAD_SHA }),
+    pull: pullRequest({
+      author: "block-member",
+      headSha: OTHER_HEAD_SHA,
+    }),
     comments: [
       reviewComment(
         `${MARKER}\n<!-- codex-security-review-range:${BASE_SHA}...${HEAD_SHA} -->\nold review`,
@@ -441,7 +638,7 @@ test("pull request updates invalidate member reviews without adding placeholders
   reviewed.context.eventName = "pull_request_target";
   reviewed.context.payload.pull_request = {
     number: 6816,
-    author_association: "MEMBER",
+    author_association: "CONTRIBUTOR",
   };
   await reviewed.github.rest.issues.addLabels({
     issue_number: 6816,
@@ -456,23 +653,28 @@ test("pull request updates invalidate member reviews without adding placeholders
   );
   assert.equal(reviewed.removedLabels.length, 1);
 
-  const unreviewed = harness();
+  const unreviewed = harness({
+    pull: pullRequest({ author: "block-member" }),
+  });
   unreviewed.context.eventName = "pull_request_target";
   unreviewed.context.payload.pull_request = {
     number: 6816,
-    author_association: "OWNER",
+    author_association: "CONTRIBUTOR",
   };
 
   await invalidatePullRequestUpdate(unreviewed);
 
   assert.equal(unreviewed.created.length, 0);
   assert.equal(unreviewed.updated.length, 0);
+  assert.equal(unreviewed.removeLabelCalls.length, 0);
 
-  const external = harness();
+  const external = harness({
+    pull: pullRequest({ author: "outside-contributor" }),
+  });
   external.context.eventName = "pull_request_target";
   external.context.payload.pull_request = {
     number: 6816,
-    author_association: "CONTRIBUTOR",
+    author_association: "MEMBER",
   };
 
   await invalidatePullRequestUpdate(external);

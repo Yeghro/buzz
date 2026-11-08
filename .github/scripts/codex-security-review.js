@@ -28,6 +28,38 @@ const completedMarker = (baseSha, headSha) =>
 
 const reviewCommand = (headSha) => `${REVIEW_COMMAND} ${headSha}`;
 
+// Org membership is invisible to the workflow token when a member keeps it
+// private, so trust is repo write access. `maintain` reports as `write`.
+async function hasWriteAccess({ github, context, core, username }) {
+  if (!username) {
+    return false;
+  }
+  try {
+    const { data } = await withGithubRetry(
+      () =>
+        github.rest.repos.getCollaboratorPermissionLevel({
+          owner: context.repo.owner,
+          repo: context.repo.repo,
+          username,
+        }),
+      { core },
+    );
+    return data.permission === "admin" || data.permission === "write";
+  } catch (error) {
+    if (error?.status === 404) {
+      return false;
+    }
+    throw error;
+  }
+}
+
+const hasCurrentReviewLabel = (pullRequest) =>
+  pullRequest.labels?.some(
+    (label) =>
+      (typeof label === "string" ? label : label?.name) ===
+      CURRENT_REVIEW_LABEL,
+  ) ?? false;
+
 const isObject = (value) =>
   value !== null && typeof value === "object" && !Array.isArray(value);
 
@@ -320,6 +352,15 @@ async function prepare({ github, context, core }) {
     requestedHeadSha = context.payload.pull_request?.head?.sha || "";
   } else if (context.eventName === "issue_comment") {
     prNumber = Number(context.payload.issue?.number);
+    const commenter = context.payload.comment?.user?.login;
+    if (
+      !(await hasWriteAccess({ github, context, core, username: commenter }))
+    ) {
+      core.info(
+        `Review commands require write access to ${context.repo.owner}/${context.repo.repo}.`,
+      );
+      return;
+    }
     const command = context.payload.comment?.body || "";
     const match = /^@buzz-security-review ([0-9a-f]{40})$/.exec(command);
     if (!match) {
@@ -352,6 +393,20 @@ async function prepare({ github, context, core }) {
     );
     return;
   }
+  if (
+    context.eventName === "pull_request_target" &&
+    !(await hasWriteAccess({
+      github,
+      context,
+      core,
+      username: pullRequest.user?.login,
+    }))
+  ) {
+    core.info(
+      `Pull request #${prNumber} requires authorization from a user with write access.`,
+    );
+    return;
+  }
   if (pullRequest.head.sha !== requestedHeadSha) {
     core.setFailed(
       `Pull request #${prNumber} moved after this review was authorized. ` +
@@ -362,6 +417,7 @@ async function prepare({ github, context, core }) {
 
   const baseSha = await getLiveMainSha({ github, context });
   const commitRange = `${baseSha}...${pullRequest.head.sha}`;
+  core.setOutput("authorized", "true");
   core.setOutput("pr_number", String(prNumber));
   core.setOutput("trigger_actor", context.actor);
   core.setOutput("base_sha", baseSha);
@@ -455,9 +511,30 @@ async function prepareBaseReconciliation({ github, context, core }) {
 }
 
 async function invalidatePullRequestUpdate({ github, context, core }) {
-  const association = context.payload.pull_request?.author_association || "";
-  const existingOnly = association === "MEMBER" || association === "OWNER";
-  await invalidate({ github, context, core, existingOnly });
+  await invalidate({
+    github,
+    context,
+    core,
+    existingOnlyForTrustedAuthors: true,
+  });
+}
+
+// A failed lookup must not skip stale-marking, so errors count as untrusted
+// and the conservative stale notice is posted.
+async function isTrustedForInvalidation({ github, context, core, pullRequest }) {
+  try {
+    return await hasWriteAccess({
+      github,
+      context,
+      core,
+      username: pullRequest.user?.login,
+    });
+  } catch (error) {
+    core.warning(
+      `Could not read PR author permission (status ${githubErrorStatus(error)}); treating the author as untrusted.`,
+    );
+    return false;
+  }
 }
 
 async function invalidate({
@@ -466,6 +543,7 @@ async function invalidate({
   core,
   prNumber: requestedPrNumber,
   existingOnly = false,
+  existingOnlyForTrustedAuthors = false,
 }) {
   const prNumber = Number(
     requestedPrNumber ?? context.payload.pull_request?.number,
@@ -482,8 +560,15 @@ async function invalidate({
   }
 
   const existing = await findReviewComment({ github, context, prNumber });
-  if (!existing && existingOnly) {
-    await clearCurrentReview({ github, context, prNumber });
+  if (
+    !existing &&
+    (existingOnly ||
+      (existingOnlyForTrustedAuthors &&
+        (await isTrustedForInvalidation({ github, context, core, pullRequest }))))
+  ) {
+    if (existingOnly || hasCurrentReviewLabel(pullRequest)) {
+      await clearCurrentReview({ github, context, prNumber });
+    }
     core.info(`PR #${prNumber} has no Codex security review to invalidate.`);
     return;
   }
@@ -505,7 +590,7 @@ ${STALE_MARKER}
 >
 > The current range is \`${liveMainSha}...${pullRequest.head.sha}\`.
 > A new review must complete for this exact range. When manual authorization
-> is required, a Block organization member must comment exactly
+> is required, a user with write access must comment exactly
 > \`${reviewCommand(pullRequest.head.sha)}\` to authorize a new review.
 > Any previous review applies only to its recorded range.
 `;
